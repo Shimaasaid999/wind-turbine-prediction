@@ -11,9 +11,14 @@ from sklearn.linear_model import Ridge
 from xgboost import XGBRegressor
 from sklearn.neural_network import MLPRegressor
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
+import tensorflow as tf
 import time
+
+# Set random seed for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
 
 # Custom CSS for styling
 st.markdown("""
@@ -95,7 +100,7 @@ df = load_model_data()
 def train_models(X_train_scaled, y_train, X_test_scaled, y_test):
     models_dict = {
         "Ridge": Ridge(alpha=1.0, random_state=42),
-        "XGBoost": XGBRegressor(n_estimators=300, learning_rate=0.05, max_depth=6, random_state=42),
+        "XGBoost": XGBRegressor(n_estimators=300, learning_rate=0.05, max_depth=6, random_state=42, verbosity=0),
         "Neural Network": MLPRegressor(hidden_layer_sizes=(64,32), activation='relu', solver='adam', max_iter=500, random_state=42),
         "LSTM": Sequential([
             LSTM(64, return_sequences=True, input_shape=(X_train_scaled.shape[1], 1)),
@@ -138,19 +143,11 @@ def train_models(X_train_scaled, y_train, X_test_scaled, y_test):
             mae = mean_absolute_error(y_test, y_pred)
             training_time = end - start
 
-            # Check training performance
-            if name == "LSTM":
-                y_train_pred_scaled = model.predict(X_train_lstm, verbose=0)
-                y_train_pred = scaler_y.inverse_transform(y_train_pred_scaled).ravel()
-            else:
-                y_train_pred = model.predict(X_train_scaled)
-            train_r2 = r2_score(y_train, y_train_pred)
-
-            results[name] = {"R2": r2, "RMSE": rmse, "MAE": mae, "Time (sec)": training_time, "Train R2": train_r2}
+            results[name] = {"R2": r2, "RMSE": rmse, "MAE": mae, "Time (sec)": training_time}
             y_pred_dict[name] = y_pred
         except Exception as e:
             st.error(f"Error training {name}: {str(e)}")
-            results[name] = {"R2": 0, "RMSE": float('inf'), "MAE": float('inf'), "Time (sec)": 0, "Train R2": 0}
+            results[name] = {"R2": 0, "RMSE": float('inf'), "MAE": float('inf'), "Time (sec)": 0}
             y_pred_dict[name] = np.zeros_like(y_test)
 
     return models_dict, results, y_pred_dict
@@ -250,7 +247,7 @@ with tab2:
         perf_df = pd.DataFrame.from_dict(results, orient='index')
         metrics = st.multiselect(
             "Select Metrics to Display",
-            options=['R2', 'RMSE', 'MAE', 'Time (sec)', 'Train R2'],
+            options=['R2', 'RMSE', 'MAE', 'Time (sec)'],
             default=['R2', 'RMSE', 'MAE', 'Time (sec)']
         )
         if metrics:
@@ -265,8 +262,7 @@ with tab2:
                     'R2': "#139462",
                     'RMSE': "#D9F00B",
                     'MAE': "#D31D78",
-                    'Time (sec)': "#261ACC",
-                    'Train R2': "#FF5733"
+                    'Time (sec)': "#261ACC"
                 }
             )
             fig.update_layout(
