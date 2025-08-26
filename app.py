@@ -10,8 +10,9 @@ from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.linear_model import Ridge
 from xgboost import XGBRegressor
 from sklearn.neural_network import MLPRegressor
-from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor
-from sklearn.neighbors import KNeighborsRegressor
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+from tensorflow.keras.callbacks import EarlyStopping
 import time
 
 # Custom CSS for styling
@@ -75,12 +76,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Clear cache button
-if st.button("Clear Cache"):
-    st.cache_data.clear()
-    st.cache_resource.clear()
-    st.write("Cache cleared! Please refresh the page.")
-
 # Load and preprocess data
 @st.cache_data
 def load_model_data():
@@ -100,19 +95,14 @@ df = load_model_data()
 def train_models(X_train_scaled, y_train, X_test_scaled, y_test):
     models_dict = {
         "Ridge": Ridge(alpha=1.0, random_state=42),
-        "XGBoost": XGBRegressor(
-            n_estimators=300,
-            learning_rate=0.05,
-            max_depth=6,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            early_stopping_rounds=10,
-            random_state=42
-        ),
+        "XGBoost": XGBRegressor(n_estimators=300, learning_rate=0.05, max_depth=6, random_state=42),
         "Neural Network": MLPRegressor(hidden_layer_sizes=(64,32), activation='relu', solver='adam', max_iter=500, random_state=42),
-        "Random Forest": RandomForestRegressor(n_estimators=100, random_state=42),
-        "AdaBoost": AdaBoostRegressor(n_estimators=50, random_state=42),
-        "KNeighbors": KNeighborsRegressor(n_neighbors=5)
+        "LSTM": Sequential([
+            LSTM(64, return_sequences=True, input_shape=(X_train_scaled.shape[1], 1)),
+            Dropout(0.2),
+            LSTM(32),
+            Dense(1)
+        ])
     }
 
     results = {}
@@ -120,15 +110,27 @@ def train_models(X_train_scaled, y_train, X_test_scaled, y_test):
     for name, model in models_dict.items():
         start = time.time()
         try:
-            if name == "XGBoost":
+            if name == "LSTM":
+                scaler_y = StandardScaler()
+                y_train_scaled = scaler_y.fit_transform(y_train.values.reshape(-1, 1))
+                y_test_scaled = scaler_y.transform(y_test.values.reshape(-1, 1))
+                X_train_lstm = np.expand_dims(X_train_scaled, axis=-1)
+                X_test_lstm = np.expand_dims(X_test_scaled, axis=-1)
+                model.compile(optimizer="adam", loss="mse")
+                es = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
                 model.fit(
-                    X_train_scaled, y_train,
-                    eval_set=[(X_test_scaled, y_test)],
-                    verbose=False
+                    X_train_lstm, y_train_scaled,
+                    validation_split=0.1,
+                    epochs=200,
+                    batch_size=32,
+                    callbacks=[es],
+                    verbose=0
                 )
+                y_pred_scaled = model.predict(X_test_lstm, verbose=0)
+                y_pred = scaler_y.inverse_transform(y_pred_scaled).ravel()
             else:
                 model.fit(X_train_scaled, y_train)
-            y_pred = model.predict(X_test_scaled)
+                y_pred = model.predict(X_test_scaled)
             end = time.time()
 
             r2 = r2_score(y_test, y_pred)
@@ -137,7 +139,11 @@ def train_models(X_train_scaled, y_train, X_test_scaled, y_test):
             training_time = end - start
 
             # Check training performance
-            y_train_pred = model.predict(X_train_scaled)
+            if name == "LSTM":
+                y_train_pred_scaled = model.predict(X_train_lstm, verbose=0)
+                y_train_pred = scaler_y.inverse_transform(y_train_pred_scaled).ravel()
+            else:
+                y_train_pred = model.predict(X_train_scaled)
             train_r2 = r2_score(y_train, y_train_pred)
 
             results[name] = {"R2": r2, "RMSE": rmse, "MAE": mae, "Time (sec)": training_time, "Train R2": train_r2}
@@ -282,21 +288,19 @@ with tab2:
         # Scatter Plots for Actual vs Predicted Power Output
         st.subheader("Actual vs Predicted Power Output")
         y_true = y_test
-        models = ["Ridge", "XGBoost", "Neural Network", "Random Forest", "AdaBoost", "KNeighbors"]
+        models = ["Ridge", "XGBoost", "Neural Network", "LSTM"]
         preds = [y_pred_dict[model] for model in models]
-        colors = ["blue", "green", "orange", "purple", "red", "teal"]
+        colors = ["blue", "green", "orange", "purple"]
 
         fig = make_subplots(
-            rows=2,
-            cols=3,
+            rows=1,
+            cols=4,
             subplot_titles=[f"{model}<br>RMSE: {np.sqrt(mean_squared_error(y_true, y_pred_dict[model])):.3f}" for model in models],
             shared_yaxes=True
         )
 
         for i, (model, pred, color) in enumerate(zip(models, preds, colors), 1):
             if len(pred) > 0:
-                row = 1 if i <= 3 else 2
-                col = i if i <= 3 else i - 3
                 fig.add_trace(
                     go.Scatter(
                         x=y_true,
@@ -308,8 +312,8 @@ with tab2:
                         hovertemplate="%{text}<br>x: %{x}<br>y: %{y}",
                         showlegend=False
                     ),
-                    row=row,
-                    col=col
+                    row=1,
+                    col=i
                 )
                 fig.add_trace(
                     go.Scatter(
@@ -320,8 +324,8 @@ with tab2:
                         name='Ideal',
                         showlegend=False
                     ),
-                    row=row,
-                    col=col
+                    row=1,
+                    col=i
                 )
 
         fig.update_layout(
@@ -359,27 +363,6 @@ with tab2:
         st.subheader("All Models Metrics")
         st.table(perf_df)
 
-        # Feature Importance for XGBoost
-        st.subheader("XGBoost Feature Importance")
-        xgb_model = models_dict["XGBoost"]
-        importance = pd.DataFrame({
-            'Feature': features,
-            'Importance': xgb_model.feature_importances_
-        }).sort_values(by='Importance', ascending=False)
-        fig = px.bar(importance, x='Feature', y='Importance', title="Feature Importance for XGBoost")
-        fig.update_layout(
-            height=400,
-            plot_bgcolor="rgba(0,0,0,0)",
-            paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="Roboto", size=20, color="#E7DFFA"),
-            title_font_size=28,
-            xaxis_title="Feature",
-            yaxis_title="Importance",
-            xaxis=dict(tickangle=45, tickfont=dict(size=18, color="#E7DFFA")),
-            yaxis=dict(tickfont=dict(size=18, color="#E7DFFA"))
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
         # Model Selection and Prediction
         st.subheader("Make a Prediction")
         model_choice = st.selectbox("Select Model", list(models_dict.keys()))
@@ -394,7 +377,13 @@ with tab2:
 
         model = models_dict[model_choice]
         try:
-            pred_power = model.predict(input_scaled)[0]
+            if model_choice == "LSTM":
+                scaler_y = StandardScaler()
+                input_lstm = np.expand_dims(input_scaled, axis=-1)
+                pred_scaled = model.predict(input_lstm, verbose=0)
+                pred_power = scaler_y.inverse_transform(pred_scaled)[0][0]
+            else:
+                pred_power = model.predict(input_scaled)[0]
             st.write(f"**Predicted Power Output**: {pred_power:.2f} kW")
         except Exception as e:
             st.error(f"Error making prediction with {model_choice}: {str(e)}")
