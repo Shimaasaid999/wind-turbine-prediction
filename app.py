@@ -4,15 +4,14 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.linear_model import Ridge
 from xgboost import XGBRegressor
 from sklearn.neural_network import MLPRegressor
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Input
-from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor
+from sklearn.neighbors import KNeighborsRegressor
 import time
 
 # Custom CSS for styling
@@ -76,6 +75,12 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# Clear cache button
+if st.button("Clear Cache"):
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.write("Cache cleared! Please refresh the page.")
+
 # Load and preprocess data
 @st.cache_data
 def load_model_data():
@@ -84,84 +89,59 @@ def load_model_data():
     df["Time stamp"] = pd.to_datetime(df["Time stamp"], format="%Y %b %d, %I:%M %p", errors='coerce')
     df["hour"] = df["Time stamp"].dt.hour
     df["month"] = df["Time stamp"].dt.month
-    df[["hour", "month"]] = df[["hour", "month"]].fillna(0).astype(int)
-    
-    # Cyclical encoding for temporal features
-    def encode_cyclical(df, col, max_val):
-        df[col + '_sin'] = np.sin(2 * np.pi * df[col] / max_val)
-        df[col + '_cos'] = np.cos(2 * np.pi * df[col] / max_val)
-        return df
-    
-    df = encode_cyclical(df, 'hour', 24)
-    df = encode_cyclical(df, 'month', 12)
+    df["day"] = df["Time stamp"].dt.day
+    df[["hour", "month", "day"]] = df[["hour", "month", "day"]].fillna(0).astype(int)
     return df
 
 df = load_model_data()
 
 # Train models
 @st.cache_resource
-def train_models(X_train_scaled, y_train, y_train_scaled, X_test_scaled, y_test):
+def train_models(X_train_scaled, y_train, X_test_scaled, y_test):
     models_dict = {
         "Ridge": Ridge(alpha=1.0, random_state=42),
-        "XGBoost": XGBRegressor(random_state=42),
+        "XGBoost": XGBRegressor(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=6,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            early_stopping_rounds=10,
+            random_state=42
+        ),
         "Neural Network": MLPRegressor(hidden_layer_sizes=(64,32), activation='relu', solver='adam', max_iter=500, random_state=42),
-        "LSTM": Sequential([
-            Input(shape=(X_train_scaled.shape[1], 1)),
-            LSTM(50),  # Match Colab's simpler architecture
-            Dense(1)
-        ])
+        "Random Forest": RandomForestRegressor(n_estimators=100, random_state=42),
+        "AdaBoost": AdaBoostRegressor(n_estimators=50, random_state=42),
+        "KNeighbors": KNeighborsRegressor(n_neighbors=5)
     }
-
-    # Tune XGBoost
-    param_grid = {
-        'n_estimators': [100, 300, 500],
-        'learning_rate': [0.01, 0.05, 0.1],
-        'max_depth': [3, 6, 9]
-    }
-    grid_search = GridSearchCV(models_dict["XGBoost"], param_grid, cv=5, scoring='neg_mean_squared_error', n_jobs=-1)
-    grid_search.fit(X_train_scaled, y_train)
-    models_dict["XGBoost"] = grid_search.best_estimator_
 
     results = {}
     y_pred_dict = {}
     for name, model in models_dict.items():
         start = time.time()
         try:
-            if name == "LSTM":
-                model.compile(optimizer="adam", loss="mse")
-                es = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+            if name == "XGBoost":
                 model.fit(
-                    np.expand_dims(X_train_scaled, axis=-1),
-                    y_train_scaled,
-                    validation_split=0.1,
-                    epochs=200,
-                    batch_size=32,
-                    callbacks=[es],
-                    verbose=0
+                    X_train_scaled, y_train,
+                    eval_set=[(X_test_scaled, y_test)],
+                    verbose=False
                 )
-                y_pred = model.predict(np.expand_dims(X_test_scaled, axis=-1), verbose=0).flatten()
-                y_pred_orig = scaler_y.inverse_transform(y_pred.reshape(-1, 1)).ravel()
             else:
                 model.fit(X_train_scaled, y_train)
-                y_pred_orig = model.predict(X_test_scaled)
+            y_pred = model.predict(X_test_scaled)
             end = time.time()
 
-            y_test_orig = y_test
-            y_pred_dict[name] = y_pred_orig
-            r2 = r2_score(y_test_orig, y_pred_orig)
-            rmse = np.sqrt(mean_squared_error(y_test_orig, y_pred_orig))
-            mae = mean_absolute_error(y_test_orig, y_pred_orig)
+            r2 = r2_score(y_test, y_pred)
+            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+            mae = mean_absolute_error(y_test, y_pred)
             training_time = end - start
 
-            # Check training performance to detect overfitting
-            if name == "LSTM":
-                y_train_pred = model.predict(np.expand_dims(X_train_scaled, axis=-1), verbose=0).flatten()
-                y_train_pred_orig = scaler_y.inverse_transform(y_train_pred.reshape(-1, 1)).ravel()
-            else:
-                y_train_pred_orig = model.predict(X_train_scaled)
-            train_r2 = r2_score(y_train, y_train_pred_orig)
+            # Check training performance
+            y_train_pred = model.predict(X_train_scaled)
+            train_r2 = r2_score(y_train, y_train_pred)
 
             results[name] = {"R2": r2, "RMSE": rmse, "MAE": mae, "Time (sec)": training_time, "Train R2": train_r2}
+            y_pred_dict[name] = y_pred
         except Exception as e:
             st.error(f"Error training {name}: {str(e)}")
             results[name] = {"R2": 0, "RMSE": float('inf'), "MAE": float('inf'), "Time (sec)": 0, "Train R2": 0}
@@ -238,9 +218,8 @@ with tab1:
 
 with tab2:
     try:
-        # Features with cyclical encoding
-        features = ["Wind speed | (m/s)", "month_sin", "month_cos", "hour_sin", "hour_cos", 
-                    "Wind direction | (deg)", "Pressure | (atm)"]
+        # Features (match Colab, no cyclical encoding)
+        features = ["Wind speed | (m/s)", "month", "hour", "Wind direction | (deg)", "Pressure | (atm)"]
         X = df[features]
         y = df["System power generated | (kW)"]
 
@@ -256,12 +235,9 @@ with tab2:
         scaler_X = StandardScaler()
         X_train_scaled = scaler_X.fit_transform(X_train)
         X_test_scaled = scaler_X.transform(X_test)
-        scaler_y = MinMaxScaler()  # Match Colab for LSTM
-        y_train_scaled = scaler_y.fit_transform(y_train.values.reshape(-1, 1))
-        y_test_scaled = scaler_y.transform(y_test.values.reshape(-1, 1))
 
         # Model Training
-        models_dict, results, y_pred_dict = train_models(X_train_scaled, y_train, y_train_scaled, X_test_scaled, y_test)
+        models_dict, results, y_pred_dict = train_models(X_train_scaled, y_train, X_test_scaled, y_test)
 
         # Bar Chart for all models
         st.subheader("Performance of All Models")
@@ -306,21 +282,21 @@ with tab2:
         # Scatter Plots for Actual vs Predicted Power Output
         st.subheader("Actual vs Predicted Power Output")
         y_true = y_test
-        models = ["Ridge", "XGBoost", "Neural Network", "LSTM"]
+        models = ["Ridge", "XGBoost", "Neural Network", "Random Forest", "AdaBoost", "KNeighbors"]
         preds = [y_pred_dict[model] for model in models]
-        colors = ["blue", "green", "orange", "purple"]
+        colors = ["blue", "green", "orange", "purple", "red", "teal"]
 
         fig = make_subplots(
             rows=2,
-            cols=2,
+            cols=3,
             subplot_titles=[f"{model}<br>RMSE: {np.sqrt(mean_squared_error(y_true, y_pred_dict[model])):.3f}" for model in models],
             shared_yaxes=True
         )
 
         for i, (model, pred, color) in enumerate(zip(models, preds, colors), 1):
             if len(pred) > 0:
-                row = 1 if i <= 2 else 2
-                col = i if i <= 2 else i - 2
+                row = 1 if i <= 3 else 2
+                col = i if i <= 3 else i - 3
                 fig.add_trace(
                     go.Scatter(
                         x=y_true,
@@ -383,6 +359,27 @@ with tab2:
         st.subheader("All Models Metrics")
         st.table(perf_df)
 
+        # Feature Importance for XGBoost
+        st.subheader("XGBoost Feature Importance")
+        xgb_model = models_dict["XGBoost"]
+        importance = pd.DataFrame({
+            'Feature': features,
+            'Importance': xgb_model.feature_importances_
+        }).sort_values(by='Importance', ascending=False)
+        fig = px.bar(importance, x='Feature', y='Importance', title="Feature Importance for XGBoost")
+        fig.update_layout(
+            height=400,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Roboto", size=20, color="#E7DFFA"),
+            title_font_size=28,
+            xaxis_title="Feature",
+            yaxis_title="Importance",
+            xaxis=dict(tickangle=45, tickfont=dict(size=18, color="#E7DFFA")),
+            yaxis=dict(tickfont=dict(size=18, color="#E7DFFA"))
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
         # Model Selection and Prediction
         st.subheader("Make a Prediction")
         model_choice = st.selectbox("Select Model", list(models_dict.keys()))
@@ -392,26 +389,12 @@ with tab2:
         wind_direction = st.number_input("Wind Direction (deg)", min_value=0.0, max_value=360.0, value=180.0, step=1.0)
         pressure = st.number_input("Pressure (atm)", min_value=0.8, max_value=1.2, value=1.0, step=0.01)
 
-        # Encode input data
-        input_data = pd.DataFrame({
-            'month': [month],
-            'hour': [hour],
-            'Wind speed | (m/s)': [wind_speed],
-            'Wind direction | (deg)': [wind_direction],
-            'Pressure | (atm)': [pressure]
-        })
-        input_data = encode_cyclical(input_data, 'month', 12)
-        input_data = encode_cyclical(input_data, 'hour', 24)
-        input_data = input_data[features]
+        input_data = np.array([[wind_speed, month, hour, wind_direction, pressure]])
         input_scaled = scaler_X.transform(input_data)
 
         model = models_dict[model_choice]
         try:
-            if model_choice == "LSTM":
-                pred_scaled = model.predict(np.expand_dims(input_scaled, axis=-1), verbose=0)
-                pred_power = scaler_y.inverse_transform(pred_scaled)[0][0]
-            else:
-                pred_power = model.predict(input_scaled)[0]
+            pred_power = model.predict(input_scaled)[0]
             st.write(f"**Predicted Power Output**: {pred_power:.2f} kW")
         except Exception as e:
             st.error(f"Error making prediction with {model_choice}: {str(e)}")
